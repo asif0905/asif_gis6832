@@ -1,0 +1,398 @@
+```{r}
+#Activate RSQLite, SQLDF, & DPLYR packages
+
+#Make sure AOI and Area csv files have not been opened, will cause problems with numbering. Re-save files with number settings re-set.
+
+#To stop R from using scientific notation+
+options(scipen=999)
+options(digits=15)
+
+#specify driver connection
+sqlite.driver <- dbDriver("SQLite")
+
+#AOI Table - includes all AOIs and removed duplicate OG5 and UC_4 and unknown SU10_11 (done in SV_10_Table_Creation file)
+load(file = "D:\\R - FIA\\Carbon Calculations\\AOI_All.xlsx")
+
+
+#AOI_Area Table
+AOI_Area <- read.csv("D:\\R - FIA\\Carbon Calculations\\AOI_Area_Table.csv")
+View(AOI_Area)
+```
+
+```{r}
+##GA
+
+#Read FIA-GA database file
+FIA_GA <- "FIADB_GA.db"
+#Create connection between R and the database
+GA_db <- dbConnect(sqlite.driver,
+                   dbname = FIA_GA)
+#Load Necessary Tables
+#TREE
+tree_table_ga <- dbReadTable(GA_db,"TREE")
+#SPECIES REF
+species_table_ga <- dbReadTable(GA_db, "REF_SPECIES")
+View(species_table_ga)
+#Disconnect Database after use
+dbDisconnect(GA_db)
+
+install.packages("sqldf")
+install.packages("RSQLite")
+install.packages("tcltk2")
+library("sqldf")
+library("RSQLite")
+library("tcltk2")
+
+
+#Join AOI table and Tree table to filter out CNs of interest
+AOI_trees_ga <- sqldf("SELECT A.AOI, A.EVALID_YEAR, T.STATECD, T.PLT_CN, T.CN, T.CONDID, T.STATUSCD, T.SPCD, T.DIA, T.DIAHTCD, T.TPA_UNADJ, T.DRYBIO_BOLE, T.DRYBIO_TOP, T.DRYBIO_STUMP, T.DRYBIO_SAPLING, T.DRYBIO_WDLD_SPP, T.CARBON_AG, CASE
+                    WHEN A.ESTN_UNIT_MODIFIED = 1 AND A.EVALID_YEAR < 2014 THEN 1
+                    WHEN A.ESTN_UNIT_MODIFIED = 1 AND A.EVALID_YEAR >= 2014 THEN 2
+                    ELSE A.ESTN_UNIT_MODIFIED
+                  END AS Estn_Unit_Mod
+                   FROM AOI_All A
+                   JOIN tree_table_ga T
+                   ON A.PLT_CN = T.PLT_CN
+                   AND T.SUBP in (1,2,3,4)")
+
+#Calculate and add Carbon+Foliage column to table
+carbon_foliage_AOI_ga <- sqldf("
+  SELECT
+          t.AOI, t.EVALID_YEAR, t.STATECD, t.Estn_Unit_Mod, t.PLT_CN, t.CN, t.TPA_UNADJ, t.CARBON_AG,
+          CASE
+            WHEN t.dia >= 5.0 AND (t.statuscd = 1 OR t.statuscd = 2) THEN (t.carbon_ag + COALESCE(t.carbon_tree_foliage_calc,0))
+            WHEN t.dia < 5.0 AND (t.statuscd = 1 OR t.statuscd = 2) THEN (t.carbon_ag + COALESCE(t.carbon_sapling_foliage_calc,0))
+            ELSE t.carbon_ag
+          END AS carbon_ag_plus_foliage
+  FROM (SELECT rj.*,
+                CASE
+                  WHEN rj.diahtcd = 2 AND rj.drybio_wdld_spp IS NOT NULL
+                    THEN (rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins)*0.5 /*woodland spp*/
+                  ELSE
+                    ((rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins) *
+                      (rj.drybio_bole / ((rj.total_ag_biomass_jenkins * rj.stem_ratio_jenkins) +
+                                     (rj.total_ag_biomass_jenkins * rj.bark_ratio_jenkins))))*0.5 /*non-woodland spp*/
+                END AS carbon_tree_foliage_calc,             
+                ((rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins) * 
+                rj.jenkins_sapling_adjustment)*0.5 AS carbon_sapling_foliage_calc /*woodland spp and non-woodland spp saplings*/
+        FROM (SELECT tt.*,             
+                   (EXP(r.jenkins_stem_wood_ratio_b1 + r.jenkins_stem_wood_ratio_b2 / (tt.dia * 2.54))) AS stem_ratio_jenkins,
+                   (EXP(r.jenkins_stem_bark_ratio_b1 + r.jenkins_stem_bark_ratio_b2 / (tt.dia * 2.54))) AS bark_ratio_jenkins,
+                   (EXP(r.jenkins_foliage_ratio_b1 + r.jenkins_foliage_ratio_b2 / (tt.dia * 2.54))) AS foliage_ratio_jenkins,
+                   (EXP(r.jenkins_total_b1 + r.jenkins_total_b2 * log(tt.dia * 2.54)) * 2.2046) AS total_ag_biomass_jenkins,
+                   r.jenkins_sapling_adjustment
+              FROM AOI_trees_ga  tt INNER JOIN
+                   species_table_ga r
+                ON (tt.spcd = r.spcd)) rj) t")
+save(carbon_foliage_AOI_ga, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\carbon_foliage_AOI_ga.Rdata")
+```
+
+```{r}
+##NC
+
+#Read FIA-GA database file
+FIA_NC <- "FIADB_NC.db"
+#Create connection between R and the database
+NC_db <- dbConnect(sqlite.driver,
+                   dbname = FIA_NC)
+#Load Necessary Tables
+#TREE
+tree_table_nc <- dbReadTable(NC_db,"TREE")
+#SPECIES REF
+species_table_nc <- dbReadTable(NC_db, "REF_SPECIES")
+#Disconnect Database after use
+dbDisconnect(NC_db)
+
+#Join AOI table and Tree table to filter out CNs of interest
+AOI_trees_nc <- sqldf("SELECT A.AOI, T.STATECD, A.EVALID_YEAR, T.PLT_CN, T.CN, T.STATUSCD, T.SPCD, T.DIA, T.DIAHTCD, T.TPA_UNADJ, T.DRYBIO_BOLE, T.DRYBIO_TOP, T.DRYBIO_STUMP, T.DRYBIO_SAPLING, T.DRYBIO_WDLD_SPP, T.CARBON_AG, CASE
+                    WHEN A.ESTN_UNIT_MODIFIED = 1 AND A.EVALID_YEAR < 2014 THEN 1
+                    WHEN A.ESTN_UNIT_MODIFIED = 1 AND A.EVALID_YEAR >= 2014 THEN 2
+                    ELSE A.ESTN_UNIT_MODIFIED
+                  END AS Estn_Unit_Mod
+                   FROM AOI_All A
+                   JOIN tree_table_nc T
+                   ON A.PLT_CN = T.PLT_CN
+                  AND T.SUBP in (1,2,3,4)")
+
+#Calculate and add Carbon+Foliage column to table
+carbon_foliage_AOI_nc <- sqldf("
+  SELECT
+          t.AOI, t.STATECD, t.EVALID_YEAR, t.Estn_Unit_Mod, t.PLT_CN, t.CN, t.TPA_UNADJ, t.CARBON_AG,
+          CASE
+            WHEN t.dia >= 5.0 AND (t.statuscd = 1 OR t.statuscd = 2) THEN (t.carbon_ag + COALESCE(t.carbon_tree_foliage_calc,0))
+            WHEN t.dia < 5.0 AND (t.statuscd = 1 OR t.statuscd = 2) THEN (t.carbon_ag + COALESCE(t.carbon_sapling_foliage_calc,0))
+            ELSE t.carbon_ag
+          END AS carbon_ag_plus_foliage
+  FROM (SELECT rj.*,
+                CASE
+                  WHEN rj.diahtcd = 2 AND rj.drybio_wdld_spp IS NOT NULL
+                    THEN (rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins)*0.5 /*woodland spp*/
+                  ELSE
+                    ((rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins) *
+                      (rj.drybio_bole / ((rj.total_ag_biomass_jenkins * rj.stem_ratio_jenkins) +
+                                     (rj.total_ag_biomass_jenkins * rj.bark_ratio_jenkins))))*0.5 /*non-woodland spp*/
+                END AS carbon_tree_foliage_calc,             
+                ((rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins) * 
+                rj.jenkins_sapling_adjustment)*0.5 AS carbon_sapling_foliage_calc /*woodland spp and non-woodland spp saplings*/
+        FROM (SELECT tt.*,             
+                   (EXP(r.jenkins_stem_wood_ratio_b1 + r.jenkins_stem_wood_ratio_b2 / (tt.dia * 2.54))) AS stem_ratio_jenkins,
+                   (EXP(r.jenkins_stem_bark_ratio_b1 + r.jenkins_stem_bark_ratio_b2 / (tt.dia * 2.54))) AS bark_ratio_jenkins,
+                   (EXP(r.jenkins_foliage_ratio_b1 + r.jenkins_foliage_ratio_b2 / (tt.dia * 2.54))) AS foliage_ratio_jenkins,
+                   (EXP(r.jenkins_total_b1 + r.jenkins_total_b2 * log(tt.dia * 2.54)) * 2.2046) AS total_ag_biomass_jenkins,
+                   r.jenkins_sapling_adjustment
+              FROM AOI_trees_nc  tt INNER JOIN
+                   species_table_nc r
+                ON (tt.spcd = r.spcd)) rj) t")
+save(carbon_foliage_AOI_nc, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\carbon_foliage_AOI_nc.Rdata")
+```
+
+```{r}
+##SC
+
+#Read FIA-GA database file
+FIA_SC <- "FIADB_SC.db"
+#Create connection between R and the database
+SC_db <- dbConnect(sqlite.driver,
+                   dbname = FIA_SC)
+#Load Necessary Tables
+#TREE
+tree_table_sc <- dbReadTable(SC_db,"TREE")
+#SPECIES REF
+species_table_sc <- dbReadTable(SC_db, "REF_SPECIES")
+
+#Disconnect Database after use
+dbDisconnect(SC_db)
+
+
+#Join AOI table and Tree table to filter out CNs of interest
+AOI_trees_sc <- sqldf("SELECT A.AOI, T.STATECD, A.EVALID_YEAR, T.PLT_CN, T.CN, T.STATUSCD, T.SPCD, T.DIA, T.DIAHTCD, T.TPA_UNADJ, T.DRYBIO_BOLE, T.DRYBIO_TOP, T.DRYBIO_STUMP, T.DRYBIO_SAPLING, T.DRYBIO_WDLD_SPP, T.CARBON_AG, CASE
+                    WHEN A.ESTN_UNIT_MODIFIED = 1 AND A.EVALID_YEAR < 2014 THEN 1
+                    WHEN A.ESTN_UNIT_MODIFIED = 1 AND A.EVALID_YEAR >= 2014 THEN 2
+                    ELSE A.ESTN_UNIT_MODIFIED
+                  END AS Estn_Unit_Mod
+                   FROM AOI_All A
+                   JOIN tree_table_sc T
+                   ON A.PLT_CN = T.PLT_CN
+                   AND T.SUBP in (1,2,3,4)")
+
+#Calculate and add Carbon+Foliage column to table
+carbon_foliage_AOI_sc <- sqldf("
+  SELECT
+          t.AOI, t.STATECD, t.EVALID_YEAR, t.Estn_Unit_Mod, t.PLT_CN, t.CN, t.TPA_UNADJ, t.CARBON_AG,
+          CASE
+            WHEN t.dia >= 5.0 AND (t.statuscd = 1 OR t.statuscd = 2) THEN (t.carbon_ag + COALESCE(t.carbon_tree_foliage_calc,0))
+            WHEN t.dia < 5.0 AND (t.statuscd = 1 OR t.statuscd = 2) THEN (t.carbon_ag + COALESCE(t.carbon_sapling_foliage_calc,0))
+            ELSE t.carbon_ag
+          END AS carbon_ag_plus_foliage
+  FROM (SELECT rj.*,
+                CASE
+                  WHEN rj.diahtcd = 2 AND rj.drybio_wdld_spp IS NOT NULL
+                    THEN (rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins)*0.5 /*woodland spp*/
+                  ELSE
+                    ((rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins) *
+                      (rj.drybio_bole / ((rj.total_ag_biomass_jenkins * rj.stem_ratio_jenkins) +
+                                     (rj.total_ag_biomass_jenkins * rj.bark_ratio_jenkins))))*0.5 /*non-woodland spp*/
+                END AS carbon_tree_foliage_calc,             
+                ((rj.total_ag_biomass_jenkins * rj.foliage_ratio_jenkins) * 
+                rj.jenkins_sapling_adjustment)*0.5 AS carbon_sapling_foliage_calc /*woodland spp and non-woodland spp saplings*/
+        FROM (SELECT tt.*,             
+                   (EXP(r.jenkins_stem_wood_ratio_b1 + r.jenkins_stem_wood_ratio_b2 / (tt.dia * 2.54))) AS stem_ratio_jenkins,
+                   (EXP(r.jenkins_stem_bark_ratio_b1 + r.jenkins_stem_bark_ratio_b2 / (tt.dia * 2.54))) AS bark_ratio_jenkins,
+                   (EXP(r.jenkins_foliage_ratio_b1 + r.jenkins_foliage_ratio_b2 / (tt.dia * 2.54))) AS foliage_ratio_jenkins,
+                   (EXP(r.jenkins_total_b1 + r.jenkins_total_b2 * log(tt.dia * 2.54)) * 2.2046) AS total_ag_biomass_jenkins,
+                   r.jenkins_sapling_adjustment
+              FROM AOI_trees_sc  tt INNER JOIN
+                   species_table_sc r
+                ON (tt.spcd = r.spcd)) rj) t")
+save(carbon_foliage_AOI_sc, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\carbon_foliage_AOI_sc.Rdata")
+```
+
+```{r}
+#Combine state carbon foliage tables
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\carbon_foliage_AOI_ga.Rdata")
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\carbon_foliage_AOI_nc.Rdata")
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\carbon_foliage_AOI_sc.Rdata")
+
+Carbon_Foliage_All <- rbind(carbon_foliage_AOI_ga, carbon_foliage_AOI_nc, carbon_foliage_AOI_sc)
+save(Carbon_Foliage_All, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\Carbon_Foliage_All.Rdata")
+```
+
+```{r}
+#Join Plot and Cond Tables for AOIS for all states
+
+#To stop R from using scientific notation+
+options(scipen=999)
+options(digits=15)
+
+#specify driver connection
+sqlite.driver <- dbDriver("SQLite")
+#AOI Table - includes all AOIs and removed duplicate OG5 and UC_4 and unknown SU10_11 (done in SV_10_Table_Creation file)
+load(file = "D:\\R - FIA\\Carbon Calculations\\AOI_All.Rdata")
+
+##GA
+#Read FIA-GA database file
+FIA_GA <- "FIADB_GA.db"
+#Create connection between R and the database
+GA_db <- dbConnect(sqlite.driver,
+                   dbname = FIA_GA)
+#Load Necessary Tables
+#PLOT
+plot_table_ga <- dbReadTable(GA_db,"PLOT")
+#COND
+cond_table_ga <- dbReadTable(GA_db,"COND")
+#Disconnect Database after use
+dbDisconnect(GA_db)
+
+#Join AOI table with Plot and Cond tables - GA
+AOI_table_ga <- sqldf("SELECT AOI.AOI, AOI.EVALID_YEAR, C.PLT_CN, C. STATECD, C.CONDID, C.COND_STATUS_CD, C.CONDPROP_UNADJ, C.MICRPROP_UNADJ, C.SUBPPROP_UNADJ,
+                CASE
+                    WHEN AOI.ESTN_UNIT_MODIFIED = 1 AND AOI.EVALID_YEAR < 2014 THEN 1
+                    WHEN AOI.ESTN_UNIT_MODIFIED = 1 AND AOI.EVALID_YEAR >= 2014 THEN 2
+                    ELSE AOI.ESTN_UNIT_MODIFIED
+                  END AS Estn_Unit_Mod
+                FROM plot_table_ga  P
+                JOIN cond_table_ga  C
+                  ON P.CN = C.PLT_CN
+                JOIN AOI_All  AOI
+                  ON AOI.PLT_CN = P.CN")
+save(AOI_table_ga, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_table_ga.Rdata")
+
+##NC
+
+#Read FIA-GA database file
+FIA_NC <- "FIADB_NC.db"
+#Create connection between R and the database
+NC_db <- dbConnect(sqlite.driver,
+                   dbname = FIA_NC)
+#Load Necessary Tables
+#PLOT
+plot_table_nc <- dbReadTable(NC_db,"PLOT")
+#COND
+cond_table_nc <- dbReadTable(NC_db,"COND")
+#Disconnect Database after use
+dbDisconnect(NC_db)
+
+#Join AOI table with Plot and Cond tables - NC
+AOI_table_nc <- sqldf("SELECT AOI.AOI, AOI.EVALID_YEAR, C.PLT_CN, C. STATECD, C.CONDID, C.COND_STATUS_CD, C.CONDPROP_UNADJ, C.MICRPROP_UNADJ, C.SUBPPROP_UNADJ,
+                CASE
+                    WHEN AOI.ESTN_UNIT_MODIFIED = 1 AND AOI.EVALID_YEAR < 2014 THEN 1
+                    WHEN AOI.ESTN_UNIT_MODIFIED = 1 AND AOI.EVALID_YEAR >= 2014 THEN 2
+                    ELSE AOI.ESTN_UNIT_MODIFIED
+                  END AS Estn_Unit_Mod
+                FROM plot_table_nc  P
+                JOIN cond_table_nc  C
+                  ON P.CN = C.PLT_CN
+                JOIN AOI_All  AOI
+                  ON AOI.PLT_CN = P.CN")
+save(AOI_table_nc, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_table_nc.Rdata")
+
+##SC
+
+#Read FIA-GA database file
+FIA_SC <- "FIADB_SC.db"
+#Create connection between R and the database
+SC_db <- dbConnect(sqlite.driver,
+                   dbname = FIA_SC)
+#Load Necessary Tables
+#PLOT
+plot_table_sc <- dbReadTable(SC_db,"PLOT")
+#COND
+cond_table_sc <- dbReadTable(SC_db,"COND")
+#Disconnect Database after use
+dbDisconnect(SC_db)
+
+#Join AOI table with Plot and Cond tables - NC
+AOI_table_sc <- sqldf("SELECT AOI.AOI, AOI.EVALID_YEAR, C.PLT_CN, C. STATECD, C.CONDID, C.COND_STATUS_CD, C.CONDPROP_UNADJ, C.MICRPROP_UNADJ, C.SUBPPROP_UNADJ,
+                CASE
+                    WHEN AOI.ESTN_UNIT_MODIFIED = 1 AND AOI.EVALID_YEAR < 2014 THEN 1
+                    WHEN AOI.ESTN_UNIT_MODIFIED = 1 AND AOI.EVALID_YEAR >= 2014 THEN 2
+                    ELSE AOI.ESTN_UNIT_MODIFIED
+                  END AS Estn_Unit_Mod
+                FROM plot_table_sc  P
+                JOIN cond_table_sc  C
+                  ON P.CN = C.PLT_CN
+                JOIN AOI_All  AOI
+                  ON AOI.PLT_CN = P.CN")
+save(AOI_table_sc, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_table_sc.Rdata")
+
+AOI_Table_All <- rbind(AOI_table_ga, AOI_table_nc, AOI_table_sc)
+save(AOI_Table_All, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Table_All.Rdata")
+```
+
+```{r}
+#Calculate factors across all states
+
+#To stop R from using scientific notation+
+options(scipen=999)
+options(digits=15)
+
+#AOI_Area Table
+AOI_Area <- read.csv("D:\\R - FIA\\Carbon Calculations\\AOI_Area_Table.csv")
+#AOI_Table
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Table_All.Rdata")
+#Add AOI_Areas to table
+AOI_Factors_All <- sqldf("SELECT A.AOI, A.EVALID_YEAR, A.Estn_Unit_Mod, B.Area_acres, COUNT(distinct A.PLT_CN) as total_sampled_plots, 
+                        COUNT(distinct A.PLT_CN)/SUM(
+                          CASE
+                            WHEN A.COND_STATUS_CD <> 5 THEN SUBPPROP_UNADJ
+                            ELSE 0
+                          END) as adj_factor_subp,
+                        COUNT(distinct A.PLT_CN)/SUM(
+                          CASE
+                            WHEN A.COND_STATUS_CD <> 5 THEN MICRPROP_UNADJ
+                            ELSE 0
+                          END) as adj_factor_micr,
+                        B.Area_acres/COUNT(distinct A.PLT_CN) as pop_expns_factor
+                      FROM AOI_Table_All A
+                      JOIN AOI_Area B
+                        ON A.AOI = B.AOI
+                        AND A.Estn_Unit_mod = B.Area_ID
+                      GROUP BY A.AOI, EVALID_YEAR, Estn_Unit_Mod")
+save(AOI_Factors_All, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Factors_All.Rdata")
+#load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Factors_All.Rdata")
+
+#Generate total Plot Count per year without dividing by Estn_Unit_Mod. To be used for threshold level
+AOI_Counts_All <- sqldf("SELECT AOI, EVALID_YEAR, COUNT(distinct PLT_CN) as Total_Plots
+                      FROM AOI_Table_All
+                      GROUP BY AOI, EVALID_YEAR")
+save(AOI_Counts_All, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Counts_All.Rdata")
+```
+
+```{r}
+#Combine tables and do full calculation
+
+#Carbon Foliage Table
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\Carbon_Foliage_All.Rdata")
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Factors_All.Rdata")
+load(file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\AOI_Counts_All.Rdata")
+
+#Calculate Carbon+Foliage Total by AOI and EVALID_Year
+Carbon_Total_All <- sqldf("SELECT A.AOI, A.EVALID_YEAR, count(distinct C.STATECD) as State_Count, D.Total_Plots, sum(C.carbon_ag_plus_foliage * C.TPA_UNADJ * A.pop_expns_factor * 
+                            (case
+                                when C.TPA_UNADJ = 6.018046 then A.adj_factor_subp
+                                when C.TPA_UNADJ = 74.965282 then A.adj_factor_micr
+                                else 0
+                            end)) as Carbon_Total_lbs
+                      FROM AOI_Factors_All  A
+                      JOIN Carbon_Foliage_All  C
+                          ON A.AOI = C.AOI
+                          AND A.EVALID_YEAR = C.EVALID_YEAR
+                          AND A.Estn_Unit_Mod = C.Estn_Unit_Mod
+                      JOIN AOI_Counts_All D
+                          ON A.AOI = D.AOI
+                          AND A.EVALID_YEAR = D.EVALID_YEAR
+                      GROUP BY A.AOI, A.EVALID_YEAR")
+save(Carbon_Total_All, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\Carbon_Total_All.Rdata")
+write_xlsx(Carbon_Total_All, path = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\Carbon_Total_All.xlsx")
+```
+
+```{r}
+#Set sampled plots threshold for carbon data to use
+
+Carbon_Total_All_Threshold <- sqldf("SELECT *
+                                    FROM Carbon_Total_All
+                                    WHERE Total_Plots >= 5")
+save(Carbon_Total_All_Threshold, file = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\Carbon_Total_All_Threshold.Rdata")
+write_xlsx(Carbon_Total_All_Threshold, path = "D:\\R - FIA\\Carbon Calculations\\Tests\\One Region AOIs\\Carbon_Total_All_Threshold.xlsx")
+```
+
